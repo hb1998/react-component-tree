@@ -42,10 +42,10 @@ const Tree: React.FC<IProps> = () => {
             if (node) {
                 scrollToNode(node);
             }
-        })
+        });
         return () => {
             PubSub.unsubscribe(subscription);
-        }
+        };
     }, []);
 
     const scrollToNode = (node: INode) => {

@@ -4,12 +4,12 @@ import * as path from 'path';
 import { parse as babelParse } from '@babel/parser';
 import {
     ImportDeclaration, isArrayPattern, isCallExpression, isIdentifier, isImport,
-    isImportDeclaration, isImportDefaultSpecifier, isImportNamespaceSpecifier, isImportSpecifier,
+    isImportDeclaration, isExportDeclaration, isExportAllDeclaration, isExportNamedDeclaration, isFunctionDeclaration, isImportDefaultSpecifier, isImportNamespaceSpecifier, isImportSpecifier,
     isObjectPattern, isObjectProperty, isStringLiteral, isVariableDeclaration, Node as ASTNode,
-    VariableDeclaration
+    VariableDeclaration, ExportAllDeclaration, ExportNamedDeclaration, isTSTypeAliasDeclaration
 } from '@babel/types';
 
-import { ImportData, Token, Tree } from './types';
+import { ExportData, ImportData, Token, Tree } from './types';
 
 export class SaplingParser {
   /** Public method to generate component tree based on entry file or input node.
@@ -23,6 +23,31 @@ export class SaplingParser {
   public static parse(input: unknown): unknown {
     if (typeof input === 'string') {
       const entryFile = ParserHelpers.processFilePath(input);
+      let baseFilePath = path.dirname(entryFile);
+      const aliases = {};
+      for(let i = 0; i < 10; i++) {
+        const fileArray = fs.readdirSync(baseFilePath);
+        if(fileArray.includes('tsconfig.json')){
+          const tsConfigCompilerOptions = JSON.parse(fs.readFileSync(path.join(baseFilePath, 'tsconfig.json'), 'utf-8').split('\n').filter((line)=>{
+            return !line.includes('//');
+          }).join('\n')).compilerOptions;
+          if(tsConfigCompilerOptions.baseUrl){
+            baseFilePath = path.join(baseFilePath, tsConfigCompilerOptions.baseUrl);
+          }
+          if(tsConfigCompilerOptions.paths){
+            for(const [key, value] of Object.entries(tsConfigCompilerOptions.paths as Record<string, string[]>)){
+              if(value.length > 0){
+                aliases[key] = value[0];
+              }
+            }
+          }
+          break;
+        }
+        else if(fileArray.includes('package.json')){
+          break;
+        }
+        baseFilePath = path.join(baseFilePath, '..');
+      }
       // Create root Tree node
       const root = new Tree({
         name: path.basename(entryFile).replace(/\.[jt]sx?$/, ''),
@@ -30,6 +55,8 @@ export class SaplingParser {
         filePath: entryFile,
         importPath: '/', // this.entryFile here breaks windows file path on root e.g. C:\\ is detected as third party
         parent: null,
+        aliases,
+        projectBaseURL: baseFilePath
       });
       ASTParser.parser(root);
       return root;
@@ -81,7 +108,7 @@ const ASTParser = {
   parser(root: Tree): void {
     const recurse = (componentTree: Tree): void => {
       // If import is a node module, do not parse any deeper
-      if (!['\\', '/', '.'].includes(componentTree.importPath[0])) {
+      if (!['\\', '/', '.'].includes(componentTree.importPath[0]) && !componentTree.aliases[componentTree.importPath]) {
         componentTree.set('thirdParty', true);
         if (
           componentTree.fileName === 'react-router-dom' ||
@@ -157,9 +184,12 @@ const ASTParser = {
     } else {
       const moduleIdentifier = imports[astToken.value].importPath;
       const name = imports[astToken.value].importName;
-      const filePath = ParserHelpers.validateFilePath(
-        path.resolve(path.dirname(parent.filePath), moduleIdentifier)
+      let filePath = ParserHelpers.validateFilePath(
+        parent.aliases[moduleIdentifier] ? path.join(parent.projectBaseURL, parent.aliases[moduleIdentifier]) : path.resolve(path.dirname(parent.filePath), moduleIdentifier)
       );
+      if(parent.aliases[moduleIdentifier] || ['\\', '/', '.'].includes(moduleIdentifier[0])){
+        filePath = ASTParser.recursivelySearchBarrelFiles(filePath, name);
+      };
       // Add tree node to childNodes if one does not exist
       childNodes[astToken.value] = new Tree({
         name,
@@ -173,6 +203,70 @@ const ASTParser = {
       });
     }
     return childNodes;
+  },
+
+  recursivelySearchBarrelFiles(filePath: string, componentName: string): string {
+    const extensions = ['.tsx', '.ts', '.jsx', '.js'];
+    const barrelFileNames = extensions.map((ext) => `index${ext}`);
+    const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+    const parent = filePath.substring(0, filePath.lastIndexOf('/'));
+    if(!fs.existsSync(filePath)){
+      if(fileName.lastIndexOf('.') === -1){
+        for(const ext of extensions){
+          if(fs.existsSync(path.join(parent, `${fileName}${ext}`))){
+            return ASTParser.recursivelySearchBarrelFiles(path.join(parent, `${fileName}${ext}`), componentName);
+          }
+        }
+      }
+    }
+    if(fs.lstatSync(filePath).isDirectory()){
+      const files = fs.readdirSync(filePath);
+      for(const barrelFileName of barrelFileNames){
+        if(files.includes(barrelFileName)){
+          return ASTParser.recursivelySearchBarrelFiles(path.join(filePath, barrelFileName), componentName);
+        }
+      }
+    }
+    else {
+      const ast = babelParse(fs.readFileSync(filePath, 'utf-8'), {
+        sourceType: 'module',
+        tokens: true, // default: false, tokens deprecated from babel v7
+        plugins: ['jsx', 'typescript'],
+        // TODO: additional plugins to look into supporting for future releases
+        // 'importMeta': https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import.meta
+        // 'importAssertions': parses ImportAttributes type
+        // https://github.com/babel/babel/blob/main/packages/babel-parser/ast/spec.md#ImportAssertions
+        allowImportExportEverywhere: true, // enables parsing dynamic imports and exports in body
+        attachComment: false, // performance benefits
+      });
+      const exportDataArray = ImportParser.parseExports(ast.program.body);
+      // if index file
+      if(barrelFileNames.includes(filePath.substring(filePath.lastIndexOf('/') + 1))){
+        
+        for(const exportData of exportDataArray){
+          const componentFouldFilePath = ASTParser.recursivelySearchBarrelFiles(path.join(filePath,'..', exportData.exportPath), componentName);
+          if(componentFouldFilePath){
+            return componentFouldFilePath;
+          }
+        }
+
+        // Check if Component is defined in file, in which case, we return the file name
+
+        // Else, search imports
+
+      }
+      // else if not index file, but no extension, search for file with same name and different extension
+      // We have a file with an extension
+      else {
+        if(exportDataArray.length > 0){
+          for(const exportData of exportDataArray){
+            if(exportData.exportName === componentName){
+              return filePath;
+            }
+          }
+        }
+      }
+    }
   },
 
   // Finds JSX React Components in current file
@@ -268,6 +362,45 @@ const ImportParser = {
           ? Object.assign(accum, ImportParser.parseVariableDeclaration(declaration))
           : accum;
       }, {});
+  },
+
+  parseExports(body: ASTNode[]): ExportData[] {
+    return body
+      .filter((astNode) => isExportDeclaration(astNode)).reduce((accumulator, declaration) => {
+        return [...accumulator, ...(isExportAllDeclaration(declaration)
+          ? [ImportParser.parseExportAllDeclaration(declaration)]
+          : isExportNamedDeclaration(declaration) ? ImportParser.parseExportNamedDeclaration(declaration) : [{
+            exportPath: ''
+          }])];
+      }, []);
+  },
+
+  parseExportAllDeclaration(declaration: ExportAllDeclaration): ExportData {
+    return {
+      exportPath: declaration.source.value,
+    };
+  },
+
+  parseExportNamedDeclaration(declaration: ExportNamedDeclaration): ExportData[] {
+    if(isFunctionDeclaration(declaration.declaration)){
+      return [{
+        exportName: declaration.declaration.id.name
+      }];
+    }
+    if(isVariableDeclaration(declaration.declaration)){
+      return declaration.declaration.declarations.map((subDeclaration)=>{
+        if(isIdentifier(subDeclaration.id)){
+          return {
+            exportName: subDeclaration.id.name
+          };
+        }
+        throw new Error('Only Identifier exports implemented');
+      });
+    }
+    if(isTSTypeAliasDeclaration(declaration.declaration)){
+      return [];
+    }
+    throw new Error('Only Function Declaration and Variable exports implemented');
   },
 
   /* Import Declarations: 
