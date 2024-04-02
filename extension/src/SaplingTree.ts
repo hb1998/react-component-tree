@@ -9,6 +9,7 @@ export class Tree implements IRawNode, INode {
   fileName: string;
   filePath: string;
   importPath: string;
+  aliases: Record<string, string>;
   expanded: boolean;
   depth: number;
   count: number;
@@ -19,6 +20,7 @@ export class Tree implements IRawNode, INode {
   parent: Tree;
   parentList: string[];
   props: Record<string, boolean>;
+  projectBaseURL: string | undefined;
   error: 
     | '' 
     | 'File not found.' 
@@ -41,6 +43,8 @@ export class Tree implements IRawNode, INode {
     this.parent = node?.parent;
     this.parentList = node?.parentList ?? [];
     this.props = node?.props ?? {};
+    this.aliases = node?.aliases ?? node?.parent?.aliases ?? {};
+    this.projectBaseURL = node?.projectBaseURL ?? node?.parent?.projectBaseURL;
     this.error = node?.error ?? '';
   }
 
@@ -236,11 +240,12 @@ export class Tree implements IRawNode, INode {
    * @returns Tree class object with all nested descendant nodes also of Tree class.
    */
   public static deserialize(data: Tree): Tree {
-    const recurse = (node: Tree): Tree =>
-      (new Tree({
+    const recurse = (node: Tree): Tree =>{
+    return new Tree({
         ...node,
         children: node.children?.map((child) => recurse(child)),
-      }));
+      });
+  };
     return recurse(data);
   }
 }

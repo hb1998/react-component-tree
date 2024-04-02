@@ -186,9 +186,10 @@ Any updates you make to your files will be automatically processed and mirrored 
 1. Fork the [project repo](https://github.com/hb1998/react-component-tree).
 2. Open the `react-component-tree/extension` folder in your VS Code IDE.
 3. Open `extension/src/extension.ts`
-4. With the `extension` folder as your pwd, run this command: `npm run watch`.
-5. From the menu, click Run - Start Debugging (or press F5), and select VS Code Extension Development from the command palette dropdown. An extension development host will open in a new window.
-6. Click the React Component Tree icon on the extension development host window sidebar. To refresh the extension development host, use `Ctrl+R` (or `Cmd+R` on Mac).
+4. Run `npm i`
+5. With the `extension` folder as your pwd, run this command: `npm run watch`.
+6. From the menu, click Run - Start Debugging (or press F5), and select VS Code Extension Development from the command palette dropdown. An extension development host will open in a new window.
+7. Click the React Component Tree icon on the extension development host window sidebar. To refresh the extension development host, use `Ctrl+R` (or `Cmd+R` on Mac).
 
 <br />
 
