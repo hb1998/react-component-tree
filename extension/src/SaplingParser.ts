@@ -3,10 +3,10 @@ import * as path from 'path';
 
 import { parse as babelParse } from '@babel/parser';
 import {
-    ImportDeclaration, isArrayPattern, isCallExpression, isIdentifier, isImport,
+    ImportDeclaration, FunctionDeclaration, isArrayPattern, isCallExpression, isIdentifier, isImport,
     isImportDeclaration, isExportDeclaration, isExportAllDeclaration, isExportNamedDeclaration, isFunctionDeclaration, isImportDefaultSpecifier, isImportNamespaceSpecifier, isImportSpecifier,
-    isObjectPattern, isObjectProperty, isStringLiteral, isVariableDeclaration, Node as ASTNode,
-    VariableDeclaration, ExportAllDeclaration, ExportNamedDeclaration, isTSTypeAliasDeclaration
+    isObjectPattern, isObjectProperty, isStringLiteral, isVariableDeclaration, isTSTypeAnnotation, isArrowFunctionExpression, Node as ASTNode,
+    VariableDeclaration, ExportAllDeclaration, ExportNamedDeclaration, ExportDefaultDeclaration,isExportDefaultDeclaration, isTSTypeAliasDeclaration, isTSTypeLiteral, isTSPropertySignature, isVariableDeclarator, ArrowFunctionExpression, is
 } from '@babel/types';
 
 import { ExportData, ImportData, Token, Tree } from './types';
@@ -188,7 +188,16 @@ const ASTParser = {
         parent.aliases[moduleIdentifier] ? path.join(parent.projectBaseURL, parent.aliases[moduleIdentifier]) : path.resolve(path.dirname(parent.filePath), moduleIdentifier)
       );
       if(parent.aliases[moduleIdentifier] || ['\\', '/', '.'].includes(moduleIdentifier[0])){
-        filePath = ASTParser.recursivelySearchBarrelFiles(filePath, name);
+        try{
+          const barrelFileSearchResults = ASTParser.recursivelySearchBarrelFiles(filePath, name);
+          filePath = barrelFileSearchResults.filePath;
+          if(barrelFileSearchResults.props){
+            Object.assign(props, barrelFileSearchResults.props);
+          }
+        }
+        catch(e){
+          console.error('problem in recursivelySearchBarrelFiles:' + e);
+        }
       };
       // Add tree node to childNodes if one does not exist
       childNodes[astToken.value] = new Tree({
@@ -205,25 +214,28 @@ const ASTParser = {
     return childNodes;
   },
 
-  recursivelySearchBarrelFiles(filePath: string, componentName: string): string {
+  recursivelySearchBarrelFiles(filePath: string, componentName: string, topBarrelFile: boolean = true): {filePath: string, props?: Record<string, boolean>} {
     const extensions = ['.tsx', '.ts', '.jsx', '.js'];
     const barrelFileNames = extensions.map((ext) => `index${ext}`);
     const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
     const parent = filePath.substring(0, filePath.lastIndexOf('/'));
+    // If it does not have an extension, check for all possible extensions
     if(!fs.existsSync(filePath)){
       if(fileName.lastIndexOf('.') === -1){
         for(const ext of extensions){
           if(fs.existsSync(path.join(parent, `${fileName}${ext}`))){
-            return ASTParser.recursivelySearchBarrelFiles(path.join(parent, `${fileName}${ext}`), componentName);
+            return ASTParser.recursivelySearchBarrelFiles(path.join(parent, `${fileName}${ext}`), componentName, topBarrelFile);
           }
         }
       }
     }
+
+    // If it is a directory, check for barrel files
     if(fs.lstatSync(filePath).isDirectory()){
       const files = fs.readdirSync(filePath);
       for(const barrelFileName of barrelFileNames){
         if(files.includes(barrelFileName)){
-          return ASTParser.recursivelySearchBarrelFiles(path.join(filePath, barrelFileName), componentName);
+          return ASTParser.recursivelySearchBarrelFiles(path.join(filePath, barrelFileName), componentName, topBarrelFile);
         }
       }
     }
@@ -239,34 +251,68 @@ const ASTParser = {
         allowImportExportEverywhere: true, // enables parsing dynamic imports and exports in body
         attachComment: false, // performance benefits
       });
-      const exportDataArray = ImportParser.parseExports(ast.program.body);
+      const exportDataArray = ExportParser.parse(ast.program.body);
       // if index file
       if(barrelFileNames.includes(filePath.substring(filePath.lastIndexOf('/') + 1))){
-        
         for(const exportData of exportDataArray){
-          const componentFouldFilePath = ASTParser.recursivelySearchBarrelFiles(path.join(filePath,'..', exportData.exportPath), componentName);
+          const componentFouldFilePath = ASTParser.recursivelySearchBarrelFiles(path.join(filePath,'..', exportData.exportPath), componentName, false);
           if(componentFouldFilePath){
             return componentFouldFilePath;
           }
         }
-
-        // Check if Component is defined in file, in which case, we return the file name
-
-        // Else, search imports
-
+        // If file is not found in the barrel file, throw an error
+        if(topBarrelFile){
+          // console.error('FILE NOT FOUND:', {filePath, componentName, exportDataArray});
+          return {filePath};
+        }
       }
-      // else if not index file, but no extension, search for file with same name and different extension
       // We have a file with an extension
       else {
         if(exportDataArray.length > 0){
+          let foundExportData: ExportData;
           for(const exportData of exportDataArray){
             if(exportData.exportName === componentName){
-              return filePath;
+              foundExportData = exportData;
             }
+          }
+          const defaultIndex = exportDataArray.findIndex((exportData)=>{
+            return exportData.default;
+          });
+          if(defaultIndex !== -1 && topBarrelFile){
+            foundExportData = exportDataArray[defaultIndex];
+          }
+          if(foundExportData){
+              if(foundExportData.declaration){
+                return {filePath, props: DestructuredPropsParser.parse(foundExportData.declaration)};
+              }
+              // If file has a default export that is an identifier
+              else if(foundExportData.exportName){
+                const foundFn = ASTParser.findIdentifierReference(ast.program.body, foundExportData.exportName);
+                if(foundFn){
+                  return {filePath, props: DestructuredPropsParser.parse(foundFn)};
+                }
+              }
+              return {filePath};
           }
         }
       }
     }
+  },
+
+  findIdentifierReference(body: ASTNode[], identifier: string): ArrowFunctionExpression | FunctionDeclaration | undefined {
+    for(const node of body){
+      if(isFunctionDeclaration(node) && node.id && node.id.name === identifier){
+        return node;
+      }
+      if(isVariableDeclaration(node)){
+        for(const declaration of node.declarations){
+          if(isVariableDeclarator(declaration) && isIdentifier(declaration.id) && declaration.id.name === identifier && (isFunctionDeclaration(declaration.init) || isArrowFunctionExpression(declaration.init))){
+            return declaration.init;
+          }
+        }
+      }
+    }
+    return undefined;
   },
 
   // Finds JSX React Components in current file
@@ -362,45 +408,6 @@ const ImportParser = {
           ? Object.assign(accum, ImportParser.parseVariableDeclaration(declaration))
           : accum;
       }, {});
-  },
-
-  parseExports(body: ASTNode[]): ExportData[] {
-    return body
-      .filter((astNode) => isExportDeclaration(astNode)).reduce((accumulator, declaration) => {
-        return [...accumulator, ...(isExportAllDeclaration(declaration)
-          ? [ImportParser.parseExportAllDeclaration(declaration)]
-          : isExportNamedDeclaration(declaration) ? ImportParser.parseExportNamedDeclaration(declaration) : [{
-            exportPath: ''
-          }])];
-      }, []);
-  },
-
-  parseExportAllDeclaration(declaration: ExportAllDeclaration): ExportData {
-    return {
-      exportPath: declaration.source.value,
-    };
-  },
-
-  parseExportNamedDeclaration(declaration: ExportNamedDeclaration): ExportData[] {
-    if(isFunctionDeclaration(declaration.declaration)){
-      return [{
-        exportName: declaration.declaration.id.name
-      }];
-    }
-    if(isVariableDeclaration(declaration.declaration)){
-      return declaration.declaration.declarations.map((subDeclaration)=>{
-        if(isIdentifier(subDeclaration.id)){
-          return {
-            exportName: subDeclaration.id.name
-          };
-        }
-        throw new Error('Only Identifier exports implemented');
-      });
-    }
-    if(isTSTypeAliasDeclaration(declaration.declaration)){
-      return [];
-    }
-    throw new Error('Only Function Declaration and Variable exports implemented');
   },
 
   /* Import Declarations: 
@@ -574,8 +581,100 @@ const ImportParser = {
   },
 };
 
+const ExportParser = {
+  parse(body: ASTNode[]): ExportData[] {
+    return body
+      .filter((astNode) => isExportDeclaration(astNode))
+      .reduce((accumulator, declaration) => {
+        return [...accumulator, ...(isExportAllDeclaration(declaration)
+          ? [ExportParser.parseExportAllDeclaration(declaration)]
+          : isExportNamedDeclaration(declaration) ? ExportParser.parseExportNamedDeclaration(declaration) : isExportDefaultDeclaration(declaration) ? [ExportParser.parseExportDefaultDeclaration(declaration)] : [])];
+      }, []);
+  },
+
+  parseExportDefaultDeclaration(declaration: ExportDefaultDeclaration): ExportData {
+    if(isFunctionDeclaration(declaration.declaration) || isArrowFunctionExpression(declaration.declaration)){
+      return {
+        default: true,
+        declaration: declaration.declaration
+      };
+    }
+    if(isIdentifier(declaration.declaration)){
+      return {
+        default: true,
+        exportName: declaration.declaration.name
+      };
+    }
+    return {
+      default: true
+    };
+  },
+
+  parseExportAllDeclaration(declaration: ExportAllDeclaration): ExportData {
+    return {
+      exportPath: declaration.source.value,
+    };
+  },
+
+  parseExportNamedDeclaration(declaration: ExportNamedDeclaration): ExportData[] {
+    if(isFunctionDeclaration(declaration.declaration)){
+      return [{
+        exportName: declaration.declaration.id.name,
+        declaration: declaration.declaration
+      }];
+    }
+    if(isVariableDeclaration(declaration.declaration)){
+      return declaration.declaration.declarations.map((subDeclaration): ExportData=>{
+        if(isIdentifier(subDeclaration.id)){
+          if(isFunctionDeclaration(subDeclaration.init) || isArrowFunctionExpression(subDeclaration.init)){
+            return {
+              exportName: subDeclaration.id.name,
+              declaration: subDeclaration.init
+            };
+          }
+          return {
+            exportName: subDeclaration.id.name
+          };
+        }
+        throw new Error('Only Identifier exports implemented');
+      });
+    }
+    if(isTSTypeAliasDeclaration(declaration.declaration)){
+      return [];
+    }
+    throw new Error('Only Function Declaration and Variable exports implemented');
+  }
+};
+
+const DestructuredPropsParser = {
+  parse(fn: FunctionDeclaration | ArrowFunctionExpression): Record<string, boolean> {
+    if(isFunctionDeclaration(fn) || isArrowFunctionExpression(fn)){
+      if(isObjectPattern(fn.params[0])){
+          return DestructuredPropsParser.arrayToObject(fn.params[0].properties.map((prop)=>{
+            if(isObjectProperty(prop) && isIdentifier(prop.key)){
+              return prop.key.name;
+            }
+          }));
+        }
+      else if(isIdentifier(fn.params[0]) && isTSTypeAnnotation(fn.params[0].typeAnnotation) && isTSTypeLiteral(fn.params[0].typeAnnotation.typeAnnotation)){
+        return DestructuredPropsParser.arrayToObject(fn.params[0].typeAnnotation.typeAnnotation.members.map((member)=>{
+          if(isTSPropertySignature(member) && isIdentifier(member.key)){
+            return member.key.name;
+          }
+        }));
+      }
+    }
+    return {};
+  },
+  arrayToObject(props: string[]): Record<string, boolean> {
+    return props.reduce((accumulator, prop) => {
+      accumulator[prop] = true;
+      return accumulator;
+    }, {});
+  }
+};
+
 // TODO: Follow import source paths and parse Export{Named,Default,All}Declarations
 // See: https://github.com/babel/babel/blob/main/packages/babel-parser/ast/spec.md#exports
 // Necessary for handling...
 // barrel files, namespace imports, default import + namespace/named imports, require invocations/method calls, ...
-const ExportParser = {};
